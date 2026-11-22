@@ -1,0 +1,150 @@
+# Scratch workflow for the fork only. Runs upstream CI's commands for the
+# commit below this one on GitHub-hosted runners. Never part of a pull request.
+name: Verify (fork)
+
+on:
+  push:
+    branches:
+      - "verify/**"
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+            !/apps/mobile/modules/t3-terminal/Vendor/**/*.a
+          sparse-checkout-cone-mode: false
+      - uses: ./.github/actions/setup-ci-deps
+      - name: Ensure Electron runtime is installed
+        run: vp run --filter @t3tools/desktop ensure:electron
+      - name: Check unused code
+        if: ${{ !cancelled() }}
+        run: vp run knip:check
+      - name: Check i18n catalogs
+        if: ${{ !cancelled() }}
+        run: vp run i18n:check
+      - name: Check (format and lint)
+        if: ${{ !cancelled() }}
+        run: vp check
+
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+            !/apps/mobile/modules/t3-terminal/Vendor/**/*.a
+          sparse-checkout-cone-mode: false
+      - uses: ./.github/actions/setup-ci-deps
+        with:
+          save-pnpm-store: "false"
+      - name: Ensure Electron runtime is installed
+        run: vp run --filter @t3tools/desktop ensure:electron
+      - name: Typecheck
+        run: vp run -r --cache --concurrency-limit 4 typecheck
+
+  test_mobile:
+    name: Test (mobile)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+            !/apps/mobile/modules/t3-terminal/Vendor/**/*.a
+          sparse-checkout-cone-mode: false
+      - uses: ./.github/actions/setup-ci-deps
+        with:
+          save-pnpm-store: "false"
+      - name: Test
+        run: |
+          set -o pipefail
+          vp run --filter @t3tools/mobile test 2>&1 | python3 -u -c '
+          import sys
+          for line in sys.stdin:
+              sys.stdout.write(line.encode("ascii", "backslashreplace").decode("ascii"))
+          '
+
+  device:
+    name: Simulator (${{ matrix.device }})
+    runs-on: xcode-27
+    timeout-minutes: 110
+    strategy:
+      fail-fast: false
+      matrix:
+        device: [iphone-duo-closed, iphone-6.9, iphone-duo-open]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          pod --version
+          xcrun simctl list devicetypes | grep -i -E "duo|17 Pro Max" || true
+          xcrun simctl list runtimes
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1.15.0
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: |
+            args:
+              - --filter=@t3tools/mobile...
+              - --filter=@t3tools/scripts...
+              - --filter=t3...
+
+      - name: Expose pnpm
+        run: |
+          pnpm_version="$(node --print "require('./package.json').packageManager.split('@').pop()")"
+          vp_pnpm_bin="$HOME/.vite-plus/package_manager/pnpm/$pnpm_version/pnpm/bin"
+          echo "$vp_pnpm_bin" >> "$GITHUB_PATH"
+          "$vp_pnpm_bin/pnpm" --version
+
+      - name: Install AXe
+        run: |
+          brew tap cameroncooke/axe
+          if brew commands | grep -qx trust; then brew trust --formula cameroncooke/axe/axe; fi
+          brew install cameroncooke/axe/axe
+
+      - name: Install simulator controls
+        run: npm install --global agent-device@0.21.41
+
+      - name: Capture the thread scene and keep the app running
+        run: pnpm screenshots:mobile --platform ios --device "${{ matrix.device }}" --scene thread --appearance dark --keep-running
+
+      - name: Drive the settle button
+        if: ${{ !cancelled() }}
+        run: python3 .github/scripts/verify-fork-drive.py "$RUNNER_TEMP/drive"
+
+      - name: Upload captures
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: device-${{ matrix.device }}
+          path: |
+            artifacts/app-store/screenshots/apple/
+            ${{ runner.temp }}/drive/
+          if-no-files-found: warn
+          retention-days: 7
