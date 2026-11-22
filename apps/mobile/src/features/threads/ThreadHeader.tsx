@@ -8,7 +8,7 @@ import {
 } from "@t3tools/client-runtime/state/thread-settled";
 import type { SnoozePresetSetting } from "@t3tools/contracts/settings";
 import { useGT, useMessages } from "gt-react-native";
-import { use, useRef } from "react";
+import { use, useState } from "react";
 
 import { AppBar } from "../../components/ui/AppBar";
 import type { AppBarAction, AppBarMenu, AppBarMenuItem } from "../../components/ui/AppBar.types";
@@ -26,6 +26,11 @@ import {
   useThreadGitMenuDefinition,
   type ThreadGitControlsProps,
 } from "./ThreadGitControls";
+
+/** Resolved again at the press: a duration counts from then, and a set time may have passed. */
+function pickSnoozeTimeAtPress(input: Omit<Parameters<typeof pickSnoozePreset>[0], "now">) {
+  return pickSnoozePreset({ ...input, now: new Date() });
+}
 
 export function ThreadHeader(props: {
   readonly title: string;
@@ -48,7 +53,7 @@ export function ThreadHeader(props: {
   const route = use(NavigationRouteContext);
   const { layout, toggleAuxiliaryPane, startNewTask } = useAdaptiveWorkspaceLayout();
   const { settleThread, unsettleThread, snoozeThread, unsnoozeThread } = useThreadListActions();
-  const putAwayInFlight = useRef(false);
+  const [puttingAway, setPuttingAway] = useState(false);
   const now = new Date(useNowMinuteMs()).toISOString();
   const { panes } = useWorkspacePaneState();
   const gitMenu = useThreadGitMenuDefinition(props.gitControls);
@@ -70,22 +75,15 @@ export function ThreadHeader(props: {
   };
   // Beside the list, or over another page, the thread stays open and the button offers the reverse.
   const putAway = async (run: () => Promise<boolean>) => {
-    if (putAwayInFlight.current) return;
-    putAwayInFlight.current = true;
+    setPuttingAway(true);
     const done = await run().catch(() => false);
-    putAwayInFlight.current = false;
+    setPuttingAway(false);
     if (done && !layout.usesSplitView && navigation.isFocused() && opensOverList()) goBack();
   };
-  // The button flips before the server answers; a reverse sent then would lose to the leave.
-  const reverse = (run: () => Promise<boolean>) => {
-    if (!putAwayInFlight.current) void run();
-  };
   const snoozeUntil = (target: EnvironmentThreadShell, presetId: string) => {
-    // Resolved again at the press: a duration counts from now, and a set time may have passed.
-    const preset = pickSnoozePreset({
+    const preset = pickSnoozeTimeAtPress({
       shown: snoozeTimes,
       id: presetId,
-      now: new Date(),
       ...presetOptions,
       resolve: m,
     });
@@ -98,6 +96,7 @@ export function ThreadHeader(props: {
       );
     }
   };
+  // Held, the button offers the list's other way to put a thread away.
   const holdMenu = (target: EnvironmentThreadShell): ReadonlyArray<AppBarMenuItem> => {
     if (snoozed) {
       return [
@@ -105,7 +104,7 @@ export function ThreadHeader(props: {
           id: "unsnooze",
           title: gt("Wake thread"),
           icon: "clock",
-          onPress: () => reverse(() => unsnoozeThread(target)),
+          onPress: () => void unsnoozeThread(target),
         },
       ];
     }
@@ -134,8 +133,10 @@ export function ThreadHeader(props: {
       icon: settled ? "arrow.uturn.backward" : "checkmark",
       primary: true,
       separateBackground: false,
+      // The button flips before the server answers; a reverse sent then would lose to the leave.
+      loading: puttingAway,
       onPress: settled
-        ? () => reverse(() => unsettleThread(thread))
+        ? () => void unsettleThread(thread)
         : () => void putAway(() => settleThread(thread)),
       ...(menu.length > 0 ? { menu } : {}),
     });
